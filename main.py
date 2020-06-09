@@ -1,8 +1,13 @@
-
 from google.cloud import datastore
 from flask import Flask, request, jsonify
 from requests_oauthlib import OAuth2Session
 import json
+import constants
+import cloud_keys
+import verificationHelper
+import game
+import boat
+import load
 from google.oauth2 import id_token
 from google.auth import crypt
 from google.auth import jwt
@@ -13,14 +18,16 @@ import os
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 app = Flask(__name__)
+app.register_blueprint(game.bp)
+app.register_blueprint(boat.bp)
+app.register_blueprint(load.bp)
 client = datastore.Client()
 
-BOATS = "boats"
 
 # These should be copied from an OAuth2 Credential section at
 # https://console.cloud.google.com/apis/credentials
-client_id = "467068889594-acc65qdnts17iif94o2a6dnt2vc8vtao.apps.googleusercontent.com"
-client_secret = "p5MPAhZQ_t67xT9WYNo7Xw6q"
+client_id = cloud_keys.client_id
+client_secret = cloud_keys.client_secret
 
 # This is the page that you will use to decode and collect the info from
 # the Google authentication flow
@@ -46,17 +53,6 @@ def handle_auth_error(ex):
     response.status_code = ex.status_code
     return response
 
-#Verification handler adopted from
-def verify_jwt(request):
-    try:
-        auth_header = request.headers['Authorization'].split()
-        token = auth_header[1]
-        req = requests.Request()
-        id_info = id_token.verify_oauth2_token( 
-        token, req, client_id)
-        return id_info['email']
-    except:
-        return ''
 
 # This link will redirect users to begin the OAuth flow with Google
 @app.route('/')
@@ -81,70 +77,27 @@ def oauthroute():
     id_info = id_token.verify_oauth2_token( 
     token['id_token'], req, client_id)
 
-    return "Your JWT is: %s" % token['id_token']
+    if id_info['email_verified'] == False:
+        return ({'error': "invalid email"}, 401)
+
+    query = client.query(kind=constants.users)
+    query.add_filter('email', '=', id_info['email'])
+    results = list(query.fetch())
+    if len(results) == 0:
+        new_user = datastore.entity.Entity(key=client.key(constants.users))
+        new_user.update({'name': id_info['sub'], 'email': id_info['email'], 'balance': 0})
+        client.put(new_user)
+
+    return ("Your JWT is: %s" % token['id_token'], 201)
 
 
-@app.route('/boats', methods=['POST', 'GET'])
+@app.route('/users', methods=['GET'])
 def boats_post():
-    if request.method == 'POST':
-        payload = verify_jwt(request)
-        if len(payload) == 0:
-            return ("INVALID JWT", 401)
-        content = request.get_json()
-        if 'name' not in content.keys():
-            return("need a name", 400)
-        if 'type' not in content.keys():
-            return("need a type", 400)
-        if 'length' not in content.keys():
-            return("need a length", 400)
-        new_boat = datastore.entity.Entity(key=client.key(BOATS))
-        new_boat.update({'name': content['name'], 'type': content['type'], 'length': content['length'], 'owner': payload})
-        client.put(new_boat)
-        return (str(new_boat.key.id), 201)
-    elif request.method == 'GET':
-        query = client.query(kind=BOATS)
-        results = list(query.fetch())
-        for e in results:
-            e["id"] = e.key.id
-        return json.dumps(results)
-    else:
-        return ("Method not supported", 405)
-
-@app.route('/boats/<id>', methods=['DELETE'])
-def boats_delete(id):
-    if request.method == 'DELETE':
-        boatOwner = verify_jwt(request)
-        if len(boatOwner) == 0:
-            return('Need an authorization', 401)
-        boat_key = client.key(BOATS, int(id))
-        boat = client.get(key=boat_key)
-        if boat is None:
-            return('Invalid boat ID', 403)
-        elif boat["owner"] != boatOwner:
-            return('Not your boat guy', 403)
-        else:
-            client.delete(boat_key)
-            return ('', 204)
-    else:
-        return ('Method not recogonized', 405)
-
-#Rubric vs Piazza post @140 was confusing so I secured this route per rubcric
-@app.route('/owners/<id>/boats', methods=['GET'])
-def boats_owner_get(id):
     if request.method == 'GET':
-        boatOwner = verify_jwt(request)
-        if len(boatOwner) == 0:
-            return('Need an authorization', 401)
-        if boatOwner != id:
-            return('Can only see your own boats here', 401)
-        query = client.query(kind=BOATS)
-        query.add_filter('owner', '=', id)
+        query = client.query(kind=constants.users)
         results = list(query.fetch())
         for e in results:
             e["id"] = e.key.id
-        return json.dumps(results)
+        return (json.dumps(results), 200)
     else:
-        return ('Method not recogonized', 405)
-
-if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=8080, debug=True)
+        return ({'Error': "Method not recognized"}, 405)
